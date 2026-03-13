@@ -95,6 +95,7 @@ import { resolveDiscordThreadParentInfo } from "./threading.js";
 
 type DiscordConfig = NonNullable<OpenClawConfig["channels"]>["discord"];
 const log = createSubsystemLogger("discord/native-command");
+const DISCORD_LONG_RUNNING_COMMAND_TIMEOUT_MS = 12_000;
 
 function resolveDiscordNativeCommandAllowlistAccess(params: {
   cfg: OpenClawConfig;
@@ -1250,7 +1251,7 @@ export function createDiscordNativeCommand(params: {
           } satisfies CommandArgs)
         : undefined;
       const prompt = buildCommandTextFromArgs(commandDefinition, commandArgsWithRaw);
-      await dispatchDiscordCommandInteraction({
+      const dispatchPromise = dispatchDiscordCommandInteraction({
         interaction,
         prompt,
         command: commandDefinition,
@@ -1262,6 +1263,29 @@ export function createDiscordNativeCommand(params: {
         preferFollowUp: false,
         threadBindings,
       });
+      const isCompactCommand =
+        command.name === "compact" ||
+        commandDefinition.nativeName === "compact" ||
+        commandDefinition.key === "/compact";
+      if (isCompactCommand) {
+        try {
+          await withTimeout(dispatchPromise, DISCORD_LONG_RUNNING_COMMAND_TIMEOUT_MS);
+        } catch (error) {
+          if (error instanceof Error && error.message === "timeout") {
+            await safeDiscordInteractionCall("compact timeout follow-up", () =>
+              interaction.followUp({
+                content:
+                  "⏳ /compact is still processing. I will post the result here when it finishes.",
+                ephemeral: true,
+              }),
+            );
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
+      await dispatchPromise;
     }
   })();
 }

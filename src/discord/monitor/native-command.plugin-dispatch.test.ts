@@ -4,6 +4,7 @@ import type { NativeCommandSpec } from "../../auto-reply/commands-registry.js";
 import * as dispatcherModule from "../../auto-reply/reply/provider-dispatcher.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import * as pluginCommandsModule from "../../plugins/commands.js";
+import * as timeoutModule from "../../utils/with-timeout.js";
 import { createDiscordNativeCommand } from "./native-command.js";
 import {
   createMockCommandInteraction,
@@ -78,6 +79,23 @@ function createStatusCommand(cfg: OpenClawConfig) {
   });
 }
 
+function createCompactCommand(cfg: OpenClawConfig) {
+  const commandSpec: NativeCommandSpec = {
+    name: "compact",
+    description: "Compact context",
+    acceptsArgs: true,
+  };
+  return createDiscordNativeCommand({
+    command: commandSpec,
+    cfg,
+    discordConfig: cfg.channels?.discord ?? {},
+    accountId: "default",
+    sessionPrefix: "discord:slash",
+    ephemeralDefault: true,
+    threadBindings: createNoopThreadBindingManager("default"),
+  });
+}
+
 function setConfiguredBinding(channelId: string, boundSessionKey: string) {
   persistentBindingMocks.resolveConfiguredAcpBindingRecord.mockReturnValue({
     spec: {
@@ -114,6 +132,20 @@ function createDispatchSpy() {
       tool: 0,
     },
   } as never);
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs: number = 100,
+  stepMs: number = 5,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error("Condition not met");
+    }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
 }
 
 function expectBoundSessionDispatch(
@@ -186,6 +218,34 @@ describe("Discord native plugin command dispatch", () => {
     expect(dispatchSpy).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: "direct plugin output" }),
+    );
+  });
+
+  it("shows a still-processing follow-up when slash compact exceeds the interaction window", async () => {
+    const cfg = createConfig();
+    const command = createCompactCommand(cfg);
+    const interaction = createInteraction();
+
+    vi.spyOn(pluginCommandsModule, "matchPluginCommand").mockReturnValue(null);
+    const dispatchSpy = vi
+      .spyOn(dispatcherModule, "dispatchReplyWithDispatcher")
+      .mockResolvedValue({
+        counts: {
+          final: 1,
+          block: 0,
+          tool: 0,
+        },
+      } as never);
+    vi.spyOn(timeoutModule, "withTimeout").mockRejectedValue(new Error("timeout"));
+
+    await (command as { run: (interaction: unknown) => Promise<void> }).run(interaction as unknown);
+    await waitForCondition(() => dispatchSpy.mock.calls.length === 1);
+
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("/compact is still processing"),
+        ephemeral: true,
+      }),
     );
   });
 
